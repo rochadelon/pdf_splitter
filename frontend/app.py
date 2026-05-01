@@ -12,7 +12,13 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from services.pdf_service import extract_text_and_metadata, split_pdf_by_chapters
-from services.nlp_service import identify_chapters
+from services.nlp_service import (
+    identify_chapters,
+    _run_ocr,
+    _extract_heading_candidates,
+    _filter_top_level,
+    _resolve_key,
+)
 
 # ---------------------------------------------------------------------------
 # Configuração da página
@@ -117,20 +123,55 @@ if uploaded_file and api_key_ready:
         api_key = st.session_state["mistral_api_key"].strip()
 
         try:
-            # Etapa 1: extração de metadados (local, sem API)
-            with st.spinner("📖 Extraindo metadados do PDF…"):
+            # Etapa 1: metadados locais (PyMuPDF)
+            with st.spinner("📖 Lendo estrutura do PDF…"):
                 pages = extract_text_and_metadata(pdf_bytes)
 
-            # Etapa 2: Mistral OCR identifica capítulos
-            with st.spinner("🤖 Mistral OCR analisando estrutura do documento…"):
+            # Etapa 2: OCR — roda e mostra diagnóstico imediatamente
+            with st.spinner("🤖 Mistral OCR processando o documento…"):
+                key = _resolve_key(api_key)
+                ocr_pages = _run_ocr(pdf_bytes, key)
+                candidates = _extract_heading_candidates(ocr_pages)
+                top = _filter_top_level(candidates)
+
+            # Painel de diagnóstico — expandido automaticamente se não achou nada
+            found_headings = len(top) >= 2
+            with st.expander(
+                f"🔍 Diagnóstico OCR — {'✅ headings encontrados' if found_headings else '⚠️ nenhum heading detectado'}",
+                expanded=not found_headings,
+            ):
+                st.markdown(f"**Páginas processadas:** {len(ocr_pages)}")
+
+                if candidates:
+                    st.markdown(f"**Candidatos detectados pelo parser ({len(candidates)}):**")
+                    for c in candidates:
+                        level_label = f"H{c['level']}" if c['level'] < 5 else "heurístico"
+                        st.markdown(f"- Pág. **{c['start_page']}** ({level_label}): `{c['title']}`")
+                else:
+                    st.warning(
+                        "Nenhum heading Markdown (`#`, `##`) detectado. "
+                        "O modelo de chat tentará identificar pelos padrões de texto."
+                    )
+                    st.markdown("**Amostra do texto OCR — primeiras 3 páginas:**")
+                    for p in ocr_pages[:3]:
+                        pn = p.get("index", 0) + 1
+                        st.text_area(
+                            f"Página {pn}",
+                            value=p.get("markdown", "")[:600],
+                            height=120,
+                            disabled=True,
+                            key=f"ocr_pg_{pn}",
+                        )
+
+            # Etapa 3: identificação final de capítulos
+            with st.spinner("🧠 Identificando capítulos…"):
                 chapters = asyncio.run(
                     identify_chapters(pages, pdf_bytes=pdf_bytes, api_key=api_key)
                 )
 
-            # Etapa 3: split físico e empacotamento em ZIP
+            # Etapa 4: split físico e empacotamento em ZIP
             with st.spinner(f"✂️ Dividindo em {len(chapters)} capítulo(s)…"):
                 chapter_files = split_pdf_by_chapters(pdf_bytes, chapters)
-
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     for filename, file_bytes in chapter_files:
@@ -139,7 +180,6 @@ if uploaded_file and api_key_ready:
 
             st.success(f"✅ {len(chapters)} capítulo(s) identificado(s) e extraídos!")
 
-            # Lista os capítulos encontrados
             with st.expander("📋 Capítulos encontrados", expanded=True):
                 for ch in chapters:
                     st.markdown(
@@ -169,9 +209,10 @@ with st.expander("ℹ️ Como funciona?"):
         """
         1. **API Key** — Insira sua chave Mistral na barra lateral (só existe na sessão).
         2. **Upload** — Selecione qualquer PDF com estrutura de capítulos.
-        3. **Extração** — `PyMuPDF` lê metadados estruturais de cada página.
-        4. **Mistral OCR** — O PDF é enviado ao `mistral-ocr-latest`, que lê o layout visual e extrai capítulos em JSON estruturado — inclusive em PDFs escaneados.
-        5. **Split** — O PDF é cortado fisicamente preservando imagens e formatação original.
-        6. **Download** — Todos os capítulos são entregues em um único arquivo `.zip`.
+        3. **OCR** — O PDF é enviado ao `mistral-ocr-latest`, que retorna o texto de cada página em Markdown.
+        4. **Parser** — Headings Markdown (`#`, `##`) e padrões como "Capítulo N" são extraídos diretamente.
+        5. **Chat (fallback)** — Se não houver headings claros, o `mistral-large-latest` analisa os candidatos.
+        6. **Split** — O PDF é cortado fisicamente preservando imagens e formatação.
+        7. **Download** — Todos os capítulos são entregues em um único arquivo `.zip`.
         """
     )
