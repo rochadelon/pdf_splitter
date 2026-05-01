@@ -6,7 +6,9 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     container_name: pdf_splitter_backend
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false   # não falha se o arquivo não existir
     volumes:
       - temp_data:/app/temp   # volume persistente para os ZIPs gerados
     ports:
