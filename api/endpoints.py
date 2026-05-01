@@ -1,7 +1,7 @@
 import uuid
-import asyncio
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Header
 from fastapi.responses import FileResponse
+from typing import Optional
 from api.models import TaskStatus, TaskResponse
 from services.pdf_service import extract_text_and_metadata
 from services.nlp_service import identify_chapters
@@ -14,10 +14,16 @@ tasks: dict[str, TaskStatus] = {}
 
 
 @router.post("/upload", response_model=TaskResponse, summary="Faz upload de um PDF para processamento")
-async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_pdf(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    x_mistral_api_key: Optional[str] = Header(default=None, alias="X-Mistral-Api-Key"),
+):
     """
     Recebe um arquivo PDF, valida e inicia o processamento assíncrono.
     Retorna um Task ID para acompanhamento via polling.
+    A chave Mistral pode ser enviada via header `X-Mistral-Api-Key`;
+    se omitida, usa a variável de ambiente MISTRAL_API_KEY.
     """
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="O arquivo enviado não é um PDF válido.")
@@ -27,7 +33,7 @@ async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(
     task_id = str(uuid.uuid4())
     tasks[task_id] = TaskStatus(task_id=task_id, status="pending", progress=0)
 
-    background_tasks.add_task(_process_pdf, task_id, content, file.filename)
+    background_tasks.add_task(_process_pdf, task_id, content, file.filename, x_mistral_api_key)
 
     return TaskResponse(task_id=task_id, message="Processamento iniciado. Use o Task ID para verificar o status.")
 
@@ -57,7 +63,7 @@ def download_result(task_id: str):
     )
 
 
-async def _process_pdf(task_id: str, content: bytes, filename: str):
+async def _process_pdf(task_id: str, content: bytes, filename: str, api_key: Optional[str] = None):
     """Função de background que executa o pipeline completo de processamento."""
     task = tasks[task_id]
     try:
@@ -65,9 +71,10 @@ async def _process_pdf(task_id: str, content: bytes, filename: str):
         task.progress = 10
         pages = extract_text_and_metadata(content)
 
+        # Passa os bytes brutos ao Mistral OCR para análise semântica
         task.status = "analyzing"
         task.progress = 40
-        chapters = await identify_chapters(pages)
+        chapters = await identify_chapters(pages, pdf_bytes=content, api_key=api_key)
 
         task.status = "splitting"
         task.progress = 75

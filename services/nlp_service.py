@@ -1,109 +1,89 @@
 """
 nlp_service.py
 --------------
-Motor semântico: identifica capítulos usando um funil em duas etapas:
-  1. Filtro heurístico (RegEx + análise de fonte) para pré-selecionar candidatos.
-  2. Validação via LLM (OpenAI ou Anthropic) para confirmar e extrair títulos.
+Motor principal: Mistral OCR (`mistral-ocr-latest`).
+
+Pipeline:
+  1. Faz upload do PDF como base64 para a API do Mistral.
+  2. Chama `client.ocr.process` com `annotation_schema` para extrair
+     os capítulos em JSON estruturado em uma única requisição.
+  3. Calcula `end_page` de cada capítulo com base no `start_page` do próximo.
+
+Vantagem sobre a abordagem anterior:
+  - Funciona nativamente com PDFs escaneados (sem texto selecionável).
+  - Não precisa de filtro heurístico — o modelo lê o layout visual diretamente.
+  - Uma única chamada de API substitui o filtro + loop de validação LLM.
 """
 
 from __future__ import annotations
-import re
-import json
+
+import base64
 import os
 from typing import Any
 
-import httpx
-from openai import AsyncOpenAI
+from mistralai import Mistral
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Configuração
 # ---------------------------------------------------------------------------
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+MISTRAL_OCR_MODEL = os.getenv("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
 
-_client: AsyncOpenAI | None = None
+_client: Mistral | None = None
 
 
-def _get_client() -> AsyncOpenAI:
+def _get_client(api_key: str | None = None) -> Mistral:
+    """Retorna um cliente Mistral.
+
+    Se `api_key` for fornecida (vinda do frontend), cria uma instância dedicada
+    para a requisição. Caso contrário, reutiliza o singleton configurado via env.
+    """
     global _client
+    if api_key:
+        return Mistral(api_key=api_key)
     if _client is None:
-        _client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        if not MISTRAL_API_KEY:
+            raise EnvironmentError(
+                "Nenhuma MISTRAL_API_KEY configurada. Insira sua chave na interface "
+                "ou defina a variável de ambiente MISTRAL_API_KEY."
+            )
+        _client = Mistral(api_key=MISTRAL_API_KEY)
     return _client
 
 
 # ---------------------------------------------------------------------------
-# Padrões heurísticos de capítulo
+# Schema de saída estruturada (Pydantic → annotation_schema)
 # ---------------------------------------------------------------------------
 
-CHAPTER_PATTERNS = [
-    r"(?i)^\s*(cap[ií]tulo|chapter|parte|part|se[çc][aã]o|section)\s*[\d\w]+",
-    r"(?i)^\s*[\d]+[\.\)]\s+[A-ZÁÉÍÓÚÀÃÕ][^\n]{3,60}$",
-    r"(?i)^\s*(introdu[çc][aã]o|introduction|conclus[aã]o|conclusion|refer[eê]ncias|references)\s*$",
-]
 
-_compiled_patterns = [re.compile(p, re.MULTILINE) for p in CHAPTER_PATTERNS]
+class ChapterAnnotation(BaseModel):
+    """Representa um capítulo identificado pelo Mistral OCR."""
 
-
-def _heuristic_filter(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """
-    Retorna apenas as páginas que são candidatas a início de capítulo,
-    com base em RegEx e tamanho de fonte.
-    """
-    candidates: list[dict[str, Any]] = []
-    for page in pages:
-        text = page["text"]
-        is_regex_match = any(p.search(text) for p in _compiled_patterns)
-        is_large_font = page.get("has_large_font", False)
-
-        if is_regex_match or is_large_font:
-            candidates.append(page)
-
-    return candidates
-
-
-# ---------------------------------------------------------------------------
-# Validação via LLM
-# ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """Você é um assistente especializado em análise de estrutura de documentos.
-Dado o texto de uma página de PDF, determine se ela representa o início de um novo capítulo ou seção principal.
-Responda SEMPRE com um JSON válido no formato:
-{"is_chapter_start": true/false, "title": "Título exato do capítulo ou null"}
-Não inclua nenhum texto fora do JSON."""
-
-
-async def _validate_with_llm(page: dict[str, Any]) -> dict[str, Any] | None:
-    """
-    Envia a página ao LLM para validação. Retorna o capítulo identificado ou None.
-    """
-    text_snippet = page["text"][:800]  # limita o contexto enviado ao LLM
-    user_message = (
-        f"Página {page['page_number']}.\n"
-        f"Tem fonte grande: {'Sim' if page['has_large_font'] else 'Não'}.\n\n"
-        f"Conteúdo:\n{text_snippet}"
+    title: str = Field(
+        ...,
+        description=(
+            "Título completo do capítulo ou seção principal, "
+            "exatamente como aparece no documento."
+        ),
+    )
+    start_page: int = Field(
+        ...,
+        description="Número da primeira página do capítulo (1-indexed).",
     )
 
-    client = _get_client()
-    response = await client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0,
-        max_tokens=150,
+
+class DocumentChapters(BaseModel):
+    """Schema raiz retornado pelo annotation_schema do Mistral OCR."""
+
+    chapters: list[ChapterAnnotation] = Field(
+        ...,
+        description=(
+            "Lista de todos os capítulos e seções principais identificados "
+            "no documento, em ordem de aparecimento."
+        ),
     )
-
-    raw = response.choices[0].message.content or ""
-    try:
-        result = json.loads(raw)
-        if result.get("is_chapter_start") and result.get("title"):
-            return {"chapter": result["title"], "start_page": page["page_number"]}
-    except json.JSONDecodeError:
-        pass
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -111,37 +91,71 @@ async def _validate_with_llm(page: dict[str, Any]) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-async def identify_chapters(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def identify_chapters(
+    pages: list[dict[str, Any]],
+    pdf_bytes: bytes | None = None,
+    api_key: str | None = None,
+) -> list[dict[str, Any]]:
     """
-    Pipeline completo: filtra candidatos e valida via LLM.
+    Identifica os capítulos do PDF usando o Mistral OCR.
 
-    Retorna lista de dicts:
-        [{"chapter": "1 - Introdução", "start_page": 5, "end_page": 18}, ...]
+    Args:
+        pages: saída do `pdf_service.extract_text_and_metadata` (usado para
+               obter o total de páginas e como fallback heurístico).
+        pdf_bytes: bytes brutos do PDF original — necessário para enviar ao
+                   Mistral OCR via base64.
+
+    Returns:
+        Lista de dicts: [{"chapter": str, "start_page": int, "end_page": int}, ...]
     """
-    candidates = _heuristic_filter(pages)
+    if pdf_bytes is None:
+        raise ValueError("pdf_bytes é obrigatório para o Mistral OCR.")
 
-    if not candidates:
+    client = _get_client(api_key)
+
+    # Codifica o PDF em base64 no formato data URI
+    b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
+    document_url = f"data:application/pdf;base64,{b64}"
+
+    # Chama o Mistral OCR com schema estruturado
+    ocr_response = client.ocr.process(
+        model=MISTRAL_OCR_MODEL,
+        document={
+            "type": "document_url",
+            "document_url": document_url,
+        },
+        annotation_schema=DocumentChapters,
+    )
+
+    # Extrai as anotações da primeira página (o schema é global ao documento)
+    annotations = None
+    for page in ocr_response.pages:
+        if page.annotations:
+            annotations = page.annotations
+            break
+
+    if not annotations or not annotations.chapters:
         raise ValueError(
-            "Nenhum candidato a capítulo encontrado. "
-            "O PDF pode ser escaneado ou ter estrutura não convencional."
+            "O Mistral OCR não identificou capítulos no documento. "
+            "Verifique se o PDF possui estrutura de capítulos reconhecível."
         )
 
-    # Valida candidatos com o LLM
-    validated: list[dict[str, Any]] = []
-    for page in candidates:
-        result = await _validate_with_llm(page)
-        if result:
-            validated.append(result)
+    total_pages = pages[-1]["page_number"] if pages else 1
 
-    if not validated:
-        raise ValueError("O LLM não conseguiu identificar capítulos no documento.")
-
-    # Calcula end_page de cada capítulo com base no start_page do próximo
-    total_pages = pages[-1]["page_number"]
-    for i, chapter in enumerate(validated):
-        if i + 1 < len(validated):
-            chapter["end_page"] = validated[i + 1]["start_page"] - 1
+    # Monta a lista final com end_page calculado
+    chapters: list[dict[str, Any]] = []
+    for i, ch in enumerate(annotations.chapters):
+        if i + 1 < len(annotations.chapters):
+            end_page = annotations.chapters[i + 1].start_page - 1
         else:
-            chapter["end_page"] = total_pages
+            end_page = total_pages
 
-    return validated
+        chapters.append(
+            {
+                "chapter": ch.title,
+                "start_page": ch.start_page,
+                "end_page": end_page,
+            }
+        )
+
+    return chapters

@@ -16,8 +16,9 @@ Divide automaticamente um PDF em capítulos usando **análise semântica com IA*
 | Camada | Tecnologia |
 |---|---|
 | Backend | FastAPI + Uvicorn |
-| PDF | PyMuPDF (fitz) |
-| IA | OpenAI GPT-4o-mini |
+| PDF (split físico) | PyMuPDF (fitz) |
+| OCR + NLP | Mistral OCR (`mistral-ocr-latest`) |
+| Frontend | Streamlit |
 | Empacotamento | zipfile (stdlib) |
 
 ## 🐳 Deploy com Docker (recomendado)

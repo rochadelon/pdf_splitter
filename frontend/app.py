@@ -59,6 +59,45 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
+# Sidebar — Configuração da API Key
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.markdown("## ⚙️ Configuração")
+    st.markdown("---")
+
+    api_key_input = st.text_input(
+        "🔑 Mistral API Key",
+        type="password",
+        placeholder="Insira sua chave aqui…",
+        help=(
+            "Obtenha sua chave gratuita em [console.mistral.ai](https://console.mistral.ai/). "
+            "Ela não é armazenada — só existe durante a sessão."
+        ),
+        key="mistral_api_key",
+    )
+
+    if api_key_input:
+        st.success("✅ Chave configurada")
+    else:
+        st.warning("⚠️ Insira uma API Key para continuar")
+
+    st.markdown("---")
+    st.markdown(
+        "<small>A chave é enviada apenas ao seu próprio backend e não é armazenada.</small>",
+        unsafe_allow_html=True,
+    )
+
+
+def _get_headers() -> dict:
+    """Retorna os headers HTTP incluindo a API key se fornecida."""
+    key = st.session_state.get("mistral_api_key", "").strip()
+    if key:
+        return {"X-Mistral-Api-Key": key}
+    return {}
+
+
+# ---------------------------------------------------------------------------
 # Hero
 # ---------------------------------------------------------------------------
 
@@ -66,7 +105,7 @@ st.markdown(
     """
     <div class="hero">
         <h1>📄 Semantic PDF Splitter</h1>
-        <p>Divida qualquer PDF em capítulos automaticamente usando Inteligência Artificial</p>
+        <p>Divida qualquer PDF em capítulos automaticamente usando <strong>Mistral OCR</strong></p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -76,22 +115,28 @@ st.markdown(
 # Upload
 # ---------------------------------------------------------------------------
 
+api_key_ready = bool(st.session_state.get("mistral_api_key", "").strip())
+
 uploaded_file = st.file_uploader(
     "Selecione um arquivo PDF",
     type=["pdf"],
     help="Livros, manuais, teses — qualquer PDF com capítulos.",
+    disabled=not api_key_ready,
 )
+
+if not api_key_ready:
+    st.info("👈 Insira sua **Mistral API Key** na barra lateral para começar.")
 
 if uploaded_file:
     st.info(f"📎 **{uploaded_file.name}** — {uploaded_file.size / 1024:.1f} KB")
 
     if st.button("🚀 Processar PDF", use_container_width=True, type="primary"):
-        # Envia para o backend
         with st.spinner("Enviando arquivo…"):
             try:
                 response = httpx.post(
                     f"{API_BASE}/upload",
                     files={"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")},
+                    headers=_get_headers(),
                     timeout=30,
                 )
                 response.raise_for_status()
@@ -107,12 +152,12 @@ if uploaded_file:
 # ---------------------------------------------------------------------------
 
 STATUS_LABELS = {
-    "pending":    ("⏳ Aguardando…",          "badge-pending"),
-    "extracting": ("📖 Extraindo texto…",      "badge-extracting"),
-    "analyzing":  ("🤖 Analisando com IA…",   "badge-analyzing"),
-    "splitting":  ("✂️ Dividindo PDF…",        "badge-splitting"),
-    "done":       ("✅ Concluído!",             "badge-done"),
-    "error":      ("❌ Erro no processamento", "badge-error"),
+    "pending":    ("⏳ Aguardando…",           "badge-pending"),
+    "extracting": ("📖 Extraindo metadados…",   "badge-extracting"),
+    "analyzing":  ("🤖 Mistral OCR em ação…",  "badge-analyzing"),
+    "splitting":  ("✂️ Dividindo PDF…",         "badge-splitting"),
+    "done":       ("✅ Concluído!",              "badge-done"),
+    "error":      ("❌ Erro no processamento",  "badge-error"),
 }
 
 if st.session_state.get("task_id") and not st.session_state.get("done"):
@@ -182,11 +227,12 @@ if st.session_state.get("done"):
 with st.expander("ℹ️ Como funciona?"):
     st.markdown(
         """
-        1. **Upload** — O PDF é enviado para o backend via API REST.
-        2. **Extração** — `PyMuPDF` lê o texto e os metadados de fonte de cada página.
-        3. **Filtro Heurístico** — RegEx e análise de tamanho de fonte identificam candidatos a capítulos.
-        4. **Validação IA** — Um LLM (GPT-4o-mini) confirma e extrai o título exato de cada capítulo.
-        5. **Split** — O PDF é cortado fisicamente preservando imagens e formatação.
-        6. **Download** — Todos os capítulos são entregues em um único arquivo `.zip`.
+        1. **API Key** — Insira sua chave Mistral na barra lateral (só existe na sessão, nunca é salva).
+        2. **Upload** — O PDF é enviado para o backend via API REST.
+        3. **Extração** — `PyMuPDF` lê metadados estruturais de cada página (total de páginas).
+        4. **Mistral OCR** — O PDF completo é enviado ao modelo `mistral-ocr-latest`, que lê o layout visual e o texto nativamente — inclusive em PDFs escaneados.
+        5. **Schema estruturado** — O modelo retorna os capítulos em JSON validado (título + página de início) sem necessidade de pós-processamento.
+        6. **Split** — O PDF é cortado fisicamente com `PyMuPDF`, preservando imagens e formatação.
+        7. **Download** — Todos os capítulos são entregues em um único arquivo `.zip`.
         """
     )
