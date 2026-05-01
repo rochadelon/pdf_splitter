@@ -1,7 +1,4 @@
-"""
-app.py — Frontend Streamlit do Semantic PDF Splitter
-"""
-
+import os
 import time
 import httpx
 import streamlit as st
@@ -10,7 +7,10 @@ import streamlit as st
 # Configuração
 # ---------------------------------------------------------------------------
 
-API_BASE = "http://backend:8000/api"   # nome do serviço Docker Compose
+# Em Docker Compose o nome de serviço é resolvido automaticamente.
+# No Streamlit Cloud defina a secret/env API_BASE com a URL pública do backend.
+# Fallback para localhost facilita o desenvolvimento sem Docker.
+_DEFAULT_API_BASE = os.getenv("API_BASE", "http://localhost:8000/api")
 POLL_INTERVAL = 4  # segundos entre verificações de status
 
 st.set_page_config(
@@ -83,6 +83,18 @@ with st.sidebar:
         st.warning("⚠️ Insira uma API Key para continuar")
 
     st.markdown("---")
+
+    backend_url = st.text_input(
+        "🌐 URL do Backend",
+        value=_DEFAULT_API_BASE,
+        placeholder="http://localhost:8000/api",
+        help=(
+            "URL base da API FastAPI. Útil ao rodar sem Docker ou no Streamlit Cloud. "
+            "No Docker Compose esse valor é preenchido automaticamente."
+        ),
+        key="api_base",
+    )
+
     st.markdown(
         "<small>A chave é enviada apenas ao seu próprio backend e não é armazenada.</small>",
         unsafe_allow_html=True,
@@ -95,6 +107,11 @@ def _get_headers() -> dict:
     if key:
         return {"X-Mistral-Api-Key": key}
     return {}
+
+
+def _get_api_base() -> str:
+    """Retorna a URL base da API lida do campo da sidebar."""
+    return st.session_state.get("api_base", _DEFAULT_API_BASE).rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +151,7 @@ if uploaded_file:
         with st.spinner("Enviando arquivo…"):
             try:
                 response = httpx.post(
-                    f"{API_BASE}/upload",
+                    f"{_get_api_base()}/upload",
                     files={"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")},
                     headers=_get_headers(),
                     timeout=30,
@@ -168,7 +185,7 @@ if st.session_state.get("task_id") and not st.session_state.get("done"):
 
     while True:
         try:
-            resp = httpx.get(f"{API_BASE}/status/{task_id}", timeout=10)
+            resp = httpx.get(f"{_get_api_base()}/status/{task_id}", timeout=10)
             resp.raise_for_status()
             task = resp.json()
         except httpx.HTTPError as exc:
@@ -204,7 +221,7 @@ if st.session_state.get("done"):
     st.success("✅ Seus capítulos estão prontos!")
 
     try:
-        zip_response = httpx.get(f"{API_BASE}/download/{task_id}", timeout=30)
+        zip_response = httpx.get(f"{_get_api_base()}/download/{task_id}", timeout=30)
         zip_response.raise_for_status()
         st.download_button(
             label="📦 Baixar capítulos (.zip)",
