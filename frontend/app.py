@@ -1,17 +1,22 @@
 import os
-import time
-import httpx
+import sys
+import asyncio
+import io
+import zipfile
+
 import streamlit as st
 
-# ---------------------------------------------------------------------------
-# Configuração
-# ---------------------------------------------------------------------------
+# Permite importar os serviços do diretório raiz do repositório
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-# Em Docker Compose o nome de serviço é resolvido automaticamente.
-# No Streamlit Cloud defina a secret/env API_BASE com a URL pública do backend.
-# Fallback para localhost facilita o desenvolvimento sem Docker.
-_DEFAULT_API_BASE = os.getenv("API_BASE", "http://localhost:8000/api")
-POLL_INTERVAL = 4  # segundos entre verificações de status
+from services.pdf_service import extract_text_and_metadata, split_pdf_by_chapters
+from services.nlp_service import identify_chapters
+
+# ---------------------------------------------------------------------------
+# Configuração da página
+# ---------------------------------------------------------------------------
 
 st.set_page_config(
     page_title="Semantic PDF Splitter",
@@ -39,27 +44,13 @@ st.markdown(
     }
     .hero h1 { color: #e2e8f0; font-size: 2rem; margin: 0; }
     .hero p  { color: #94a3b8; margin: 0.5rem 0 0; }
-
-    .status-badge {
-        display: inline-block;
-        padding: 0.25rem 0.75rem;
-        border-radius: 9999px;
-        font-size: 0.8rem;
-        font-weight: 600;
-    }
-    .badge-pending   { background:#374151; color:#d1d5db; }
-    .badge-extracting{ background:#1e3a5f; color:#93c5fd; }
-    .badge-analyzing { background:#3b2063; color:#c4b5fd; }
-    .badge-splitting { background:#1e4d3b; color:#6ee7b7; }
-    .badge-done      { background:#166534; color:#bbf7d0; }
-    .badge-error     { background:#7f1d1d; color:#fca5a5; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar — Configuração da API Key
+# Sidebar — Configuração
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
@@ -71,7 +62,7 @@ with st.sidebar:
         type="password",
         placeholder="Insira sua chave aqui…",
         help=(
-            "Obtenha sua chave gratuita em [console.mistral.ai](https://console.mistral.ai/). "
+            "Obtenha sua chave em [console.mistral.ai](https://console.mistral.ai/). "
             "Ela não é armazenada — só existe durante a sessão."
         ),
         key="mistral_api_key",
@@ -83,36 +74,10 @@ with st.sidebar:
         st.warning("⚠️ Insira uma API Key para continuar")
 
     st.markdown("---")
-
-    backend_url = st.text_input(
-        "🌐 URL do Backend",
-        value=_DEFAULT_API_BASE,
-        placeholder="http://localhost:8000/api",
-        help=(
-            "URL base da API FastAPI. Útil ao rodar sem Docker ou no Streamlit Cloud. "
-            "No Docker Compose esse valor é preenchido automaticamente."
-        ),
-        key="api_base",
-    )
-
     st.markdown(
-        "<small>A chave é enviada apenas ao seu próprio backend e não é armazenada.</small>",
+        "<small>Sua chave é usada apenas para chamar a API do Mistral e não é salva.</small>",
         unsafe_allow_html=True,
     )
-
-
-def _get_headers() -> dict:
-    """Retorna os headers HTTP incluindo a API key se fornecida."""
-    key = st.session_state.get("mistral_api_key", "").strip()
-    if key:
-        return {"X-Mistral-Api-Key": key}
-    return {}
-
-
-def _get_api_base() -> str:
-    """Retorna a URL base da API lida do campo da sidebar."""
-    return st.session_state.get("api_base", _DEFAULT_API_BASE).rstrip("/")
-
 
 # ---------------------------------------------------------------------------
 # Hero
@@ -129,7 +94,7 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Upload
+# Upload e processamento
 # ---------------------------------------------------------------------------
 
 api_key_ready = bool(st.session_state.get("mistral_api_key", "").strip())
@@ -144,98 +109,56 @@ uploaded_file = st.file_uploader(
 if not api_key_ready:
     st.info("👈 Insira sua **Mistral API Key** na barra lateral para começar.")
 
-if uploaded_file:
+if uploaded_file and api_key_ready:
     st.info(f"📎 **{uploaded_file.name}** — {uploaded_file.size / 1024:.1f} KB")
 
     if st.button("🚀 Processar PDF", use_container_width=True, type="primary"):
-        with st.spinner("Enviando arquivo…"):
-            try:
-                response = httpx.post(
-                    f"{_get_api_base()}/upload",
-                    files={"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")},
-                    headers=_get_headers(),
-                    timeout=30,
-                )
-                response.raise_for_status()
-                data = response.json()
-                st.session_state["task_id"] = data["task_id"]
-                st.session_state["done"] = False
-            except httpx.HTTPError as exc:
-                st.error(f"Erro ao enviar arquivo: {exc}")
-                st.stop()
+        pdf_bytes = uploaded_file.getvalue()
+        api_key = st.session_state["mistral_api_key"].strip()
 
-# ---------------------------------------------------------------------------
-# Polling de status
-# ---------------------------------------------------------------------------
-
-STATUS_LABELS = {
-    "pending":    ("⏳ Aguardando…",           "badge-pending"),
-    "extracting": ("📖 Extraindo metadados…",   "badge-extracting"),
-    "analyzing":  ("🤖 Mistral OCR em ação…",  "badge-analyzing"),
-    "splitting":  ("✂️ Dividindo PDF…",         "badge-splitting"),
-    "done":       ("✅ Concluído!",              "badge-done"),
-    "error":      ("❌ Erro no processamento",  "badge-error"),
-}
-
-if st.session_state.get("task_id") and not st.session_state.get("done"):
-    task_id = st.session_state["task_id"]
-
-    status_placeholder = st.empty()
-    progress_bar = st.progress(0)
-
-    while True:
         try:
-            resp = httpx.get(f"{_get_api_base()}/status/{task_id}", timeout=10)
-            resp.raise_for_status()
-            task = resp.json()
-        except httpx.HTTPError as exc:
-            st.error(f"Erro ao verificar status: {exc}")
-            break
+            # Etapa 1: extração de metadados (local, sem API)
+            with st.spinner("📖 Extraindo metadados do PDF…"):
+                pages = extract_text_and_metadata(pdf_bytes)
 
-        status = task.get("status", "pending")
-        progress = task.get("progress", 0)
-        label, badge_cls = STATUS_LABELS.get(status, ("Desconhecido", "badge-pending"))
+            # Etapa 2: Mistral OCR identifica capítulos
+            with st.spinner("🤖 Mistral OCR analisando estrutura do documento…"):
+                chapters = asyncio.run(
+                    identify_chapters(pages, pdf_bytes=pdf_bytes, api_key=api_key)
+                )
 
-        progress_bar.progress(progress / 100)
-        status_placeholder.markdown(
-            f'<span class="status-badge {badge_cls}">{label}</span>',
-            unsafe_allow_html=True,
-        )
+            # Etapa 3: split físico e empacotamento em ZIP
+            with st.spinner(f"✂️ Dividindo em {len(chapters)} capítulo(s)…"):
+                chapter_files = split_pdf_by_chapters(pdf_bytes, chapters)
 
-        if status == "done":
-            st.session_state["done"] = True
-            break
-        if status == "error":
-            st.error(f"Erro: {task.get('error', 'Desconhecido')}")
-            break
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for filename, file_bytes in chapter_files:
+                        zf.writestr(filename, file_bytes)
+                zip_buffer.seek(0)
 
-        time.sleep(POLL_INTERVAL)
-        st.rerun()
+            st.success(f"✅ {len(chapters)} capítulo(s) identificado(s) e extraídos!")
 
-# ---------------------------------------------------------------------------
-# Download
-# ---------------------------------------------------------------------------
+            # Lista os capítulos encontrados
+            with st.expander("📋 Capítulos encontrados", expanded=True):
+                for ch in chapters:
+                    st.markdown(
+                        f"- **{ch['chapter']}** — páginas {ch['start_page']}–{ch['end_page']}"
+                    )
 
-if st.session_state.get("done"):
-    task_id = st.session_state["task_id"]
-    st.success("✅ Seus capítulos estão prontos!")
+            st.download_button(
+                label="📦 Baixar capítulos (.zip)",
+                data=zip_buffer.getvalue(),
+                file_name=f"{uploaded_file.name.replace('.pdf', '')}_chapters.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
 
-    try:
-        zip_response = httpx.get(f"{_get_api_base()}/download/{task_id}", timeout=30)
-        zip_response.raise_for_status()
-        st.download_button(
-            label="📦 Baixar capítulos (.zip)",
-            data=zip_response.content,
-            file_name=f"chapters_{task_id[:8]}.zip",
-            mime="application/zip",
-            use_container_width=True,
-        )
-    except httpx.HTTPError as exc:
-        st.error(f"Erro ao preparar download: {exc}")
-
-    if st.button("🔄 Processar outro PDF", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
+        except ValueError as exc:
+            st.error(f"❌ {exc}")
+        except Exception as exc:
+            st.error(f"❌ Erro inesperado: {exc}")
+            st.exception(exc)
 
 # ---------------------------------------------------------------------------
 # Rodapé informativo
@@ -244,12 +167,11 @@ if st.session_state.get("done"):
 with st.expander("ℹ️ Como funciona?"):
     st.markdown(
         """
-        1. **API Key** — Insira sua chave Mistral na barra lateral (só existe na sessão, nunca é salva).
-        2. **Upload** — O PDF é enviado para o backend via API REST.
-        3. **Extração** — `PyMuPDF` lê metadados estruturais de cada página (total de páginas).
-        4. **Mistral OCR** — O PDF completo é enviado ao modelo `mistral-ocr-latest`, que lê o layout visual e o texto nativamente — inclusive em PDFs escaneados.
-        5. **Schema estruturado** — O modelo retorna os capítulos em JSON validado (título + página de início) sem necessidade de pós-processamento.
-        6. **Split** — O PDF é cortado fisicamente com `PyMuPDF`, preservando imagens e formatação.
-        7. **Download** — Todos os capítulos são entregues em um único arquivo `.zip`.
+        1. **API Key** — Insira sua chave Mistral na barra lateral (só existe na sessão).
+        2. **Upload** — Selecione qualquer PDF com estrutura de capítulos.
+        3. **Extração** — `PyMuPDF` lê metadados estruturais de cada página.
+        4. **Mistral OCR** — O PDF é enviado ao `mistral-ocr-latest`, que lê o layout visual e extrai capítulos em JSON estruturado — inclusive em PDFs escaneados.
+        5. **Split** — O PDF é cortado fisicamente preservando imagens e formatação original.
+        6. **Download** — Todos os capítulos são entregues em um único arquivo `.zip`.
         """
     )
