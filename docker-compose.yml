@@ -1,0 +1,38 @@
+services:
+
+  # ── Backend FastAPI ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: pdf_splitter_backend
+    env_file: .env
+    volumes:
+      - temp_data:/app/temp   # volume persistente para os ZIPs gerados
+    ports:
+      - "8000:8000"           # expõe a API localmente (útil para debug)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── Frontend Streamlit ───────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: pdf_splitter_frontend
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      # Sobrescreve a URL da API caso queira apontar para outro host
+      - API_BASE=http://backend:8000/api
+
+volumes:
+  temp_data:

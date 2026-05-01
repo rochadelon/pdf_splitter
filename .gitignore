@@ -1,0 +1,27 @@
+# Arquivos de ambiente
+.env
+*.env
+
+# Pasta de temporários gerados pelo app
+/temp/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Arquivos gerados
+*.zip
+*.egg-info/
+dist/
+build/
