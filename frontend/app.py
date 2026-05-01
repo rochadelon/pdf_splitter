@@ -130,22 +130,31 @@ if uploaded_file and api_key_ready:
 
             # Painel de diagnóstico — expandido automaticamente se não achou nada
             found_headings = len(top) >= 2
+            strategy = analysis.get("strategy", "?")
+            strategy_labels = {
+                "strict_patterns": "✅ Padrões estritos (Chapter N / Part N)",
+                "h1_only": "✅ Headings H1",
+                "chat": "🤖 Chat (fallback)",
+                "none": "⚠️ Nenhuma estratégia funcionou",
+            }
             with st.expander(
-                f"🔍 Diagnóstico OCR — {'✅ headings encontrados' if found_headings else '⚠️ nenhum heading detectado'}",
+                "🔍 Diagnóstico OCR — " + strategy_labels.get(strategy, strategy),
                 expanded=not found_headings,
             ):
                 st.markdown(f"**Páginas processadas:** {len(ocr_pages)}")
+                st.markdown(f"**Estratégia:** {strategy_labels.get(strategy, strategy)}")
+                st.markdown(f"**Total de headings detectados:** {len(candidates)}")
 
                 if candidates:
-                    st.markdown(f"**Candidatos detectados pelo parser ({len(candidates)}):**")
-                    for c in candidates:
-                        level_label = f"H{c['level']}" if c['level'] < 5 else "heurístico"
-                        st.markdown(f"- Pág. **{c['start_page']}** ({level_label}): `{c['title']}`")
+                    st.markdown("**Candidatos detectados (todos os níveis):**")
+                    for c in candidates[:30]:
+                        st.markdown(
+                            f"- Pág. **{c['start_page']}** (H{c['level']}): `{c['title']}`"
+                        )
+                    if len(candidates) > 30:
+                        st.caption(f"... e mais {len(candidates) - 30} headings.")
                 else:
-                    st.warning(
-                        "Nenhum heading Markdown (`#`, `##`) detectado. "
-                        "O modelo de chat tentará identificar pelos padrões de texto."
-                    )
+                    st.warning("Nenhum heading Markdown detectado no OCR.")
                     st.markdown("**Amostra do texto OCR — primeiras 3 páginas:**")
                     for p in ocr_pages[:3]:
                         pn = p.get("index", 0) + 1
@@ -154,7 +163,7 @@ if uploaded_file and api_key_ready:
                             value=p.get("markdown", "")[:600],
                             height=120,
                             disabled=True,
-                            key=f"ocr_pg_{pn}",
+                            key="ocr_pg_%d" % pn,
                         )
 
             # Etapa 3: identificação final de capítulos
