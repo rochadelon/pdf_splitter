@@ -314,7 +314,33 @@ def _fallback_candidates(ocr_pages: list[dict[str, Any]]) -> list[dict[str, Any]
         markdown = page.get("markdown", "")
         first_lines = [l.strip() for l in markdown.splitlines() if l.strip()][:3]
         for line in first_lines:
-            # Filtra linhas muito longas (provavelmente parágrafos)
             if 3 < len(line) < 100:
                 candidates.append({"title": line, "start_page": page_num, "level": 5})
-    return candidates[:50]  # limita para não sobrecarregar o chat
+    return candidates[:50]
+
+
+# ---------------------------------------------------------------------------
+# API pública para diagnóstico (usada pelo frontend sem expor internos)
+# ---------------------------------------------------------------------------
+
+def run_ocr_analysis(pdf_bytes: bytes, api_key: str | None = None) -> dict[str, Any]:
+    """
+    Executa o OCR e o parsing de headings, retornando um dict com os
+    resultados intermediários para exibição de diagnóstico.
+
+    Returns:
+        {
+            "ocr_pages": [...],       # páginas brutas do OCR
+            "candidates": [...],      # todos os candidatos detectados
+            "top_candidates": [...],  # candidatos de nível superior
+        }
+    """
+    key = _resolve_key(api_key)
+    ocr_pages = _run_ocr(pdf_bytes, key)
+    candidates = _extract_heading_candidates(ocr_pages)
+    top = _filter_top_level(candidates)
+    return {
+        "ocr_pages": ocr_pages,
+        "candidates": candidates,
+        "top_candidates": top,
+    }

@@ -12,13 +12,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from services.pdf_service import extract_text_and_metadata, split_pdf_by_chapters
-from services.nlp_service import (
-    identify_chapters,
-    _run_ocr,
-    _extract_heading_candidates,
-    _filter_top_level,
-    _resolve_key,
-)
+from services.nlp_service import identify_chapters, run_ocr_analysis
 
 # ---------------------------------------------------------------------------
 # Configuração da página
@@ -129,10 +123,10 @@ if uploaded_file and api_key_ready:
 
             # Etapa 2: OCR — roda e mostra diagnóstico imediatamente
             with st.spinner("🤖 Mistral OCR processando o documento…"):
-                key = _resolve_key(api_key)
-                ocr_pages = _run_ocr(pdf_bytes, key)
-                candidates = _extract_heading_candidates(ocr_pages)
-                top = _filter_top_level(candidates)
+                analysis = run_ocr_analysis(pdf_bytes, api_key=api_key)
+                ocr_pages = analysis["ocr_pages"]
+                candidates = analysis["candidates"]
+                top = analysis["top_candidates"]
 
             # Painel de diagnóstico — expandido automaticamente se não achou nada
             found_headings = len(top) >= 2
