@@ -213,9 +213,33 @@ with st.expander("ℹ️ Como funciona?"):
         1. **API Key** — Insira sua chave Mistral na barra lateral (só existe na sessão).
         2. **Upload** — Selecione qualquer PDF com estrutura de capítulos.
         3. **OCR** — O PDF é enviado ao `mistral-ocr-latest`, que retorna o texto de cada página em Markdown.
-        4. **Parser** — Headings Markdown (`#`, `##`) e padrões como "Capítulo N" são extraídos diretamente.
+        4. **Parser** — Headings Markdown (`#`, `##`) e padrões como \"Capítulo N\" são extraídos diretamente.
         5. **Chat (fallback)** — Se não houver headings claros, o `mistral-large-latest` analisa os candidatos.
         6. **Split** — O PDF é cortado fisicamente preservando imagens e formatação.
         7. **Download** — Todos os capítulos são entregues em um único arquivo `.zip`.
         """
     )
+
+# ---------------------------------------------------------------------------
+# Footer — criado por
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown(
+    """
+    <div style="text-align: center; color: #64748b; font-size: 0.85rem; padding: 0.5rem 0 1rem;">
+        Criado por
+        <a href="https://www.linkedin.com/in/delonrocha/" target="_blank"
+           style="color: #0A66C2; text-decoration: none; font-weight: 600;">
+            &#128100; Delon Rocha
+        </a>
+        &nbsp;·&nbsp;
+        <a href="https://github.com/rochadelon/pdf_splitter" target="_blank"
+           style="color: #e2e8f0; text-decoration: none; font-weight: 600;">
+            &#128196; GitHub
+        </a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
