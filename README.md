@@ -12,6 +12,7 @@
 **Divide qualquer PDF em capítulos automaticamente usando Mistral OCR + IA.**
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://alanspdfsplitter.streamlit.app)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-delonrocha-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/delonrocha/)
 
 </div>
 
